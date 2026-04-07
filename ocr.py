@@ -1,52 +1,55 @@
-import os
-import subprocess
-import sys
-
 def ocr_pdf_to_pdf(input_pdf, output_pdf, lang='eng', force_ocr=False):
-    """
-    Create a searchable PDF using ocrmypdf with fastest settings.
-    Avoids PDF/A conversion to prevent color space errors.
-    """
+    import shutil, sys, subprocess, os
+    
     if not force_ocr and os.path.exists(output_pdf):
         print(f"OCR output already exists: {output_pdf}")
         return output_pdf
 
     os.makedirs(os.path.dirname(output_pdf), exist_ok=True)
+    
+    # Check dependencies first
+    if not shutil.which("gs") and not shutil.which("tesseract"):
+        raise RuntimeError("Missing dependencies: Install Ghostscript and Tesseract")
+    
+    # Check language pack
+    try:
+        result = subprocess.run(["tesseract", "--list-langs"], 
+                              capture_output=True, text=True, check=True)
+        if lang not in result.stdout and lang.split('+')[0] not in result.stdout:
+            print(f"⚠ Warning: Language '{lang}' may not be installed in Tesseract")
+    except:
+        pass  # Don't block execution, just warn
 
-    # Fastest parameters:
-    # --output-type pdf          → no PDF/A conversion (avoids color space issues)
-    # --optimize 1               → basic optimization (2 is slower)
-    # --jobs 1                   → single thread
-    # --tesseract-timeout 0      → no timeout for large files
-    # --skip-text                → don’t re‑OCR pages that already have text
-    # --color-conversion-strategy RGB → convert weird color spaces
-    # --quiet                    → suppress most warnings
     cmd = [
         sys.executable, "-m", "ocrmypdf",
         "--language", lang,
         "--output-type", "pdf",
         "--optimize", "0",
-        "--fast-web-view", "999999",
+        "--fast-web-view", "999999", 
         "--jobs", "1",
         "--tesseract-timeout", "0",
-        "--skip-text",
+        "--skip-text" if not force_ocr else "--force-ocr",
         "--color-conversion-strategy", "RGB",
-        # "--skip-big",
         input_pdf, output_pdf
     ]
+    
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
-        print(f"OCR completed: {output_pdf}")
+        print(f"✓ OCR completed: {output_pdf}")
+        return output_pdf
     except subprocess.CalledProcessError as e:
-        print(f"OCR failed for {input_pdf}: {e.stderr}")
+        print(f"\n❌ OCR failed for: {os.path.basename(input_pdf)}")
+        print(f"   Command: {' '.join(cmd)}")
+        if e.stderr:
+            print(f"   Error output:\n{e.stderr[:500]}")  # First 500 chars
+        # Suggest fixes based on error content
+        err = e.stderr.lower()
+        if "ben" in err or "language" in err:
+            print("   💡 Try: sudo apt install tesseract-ocr-ben")
+        elif "ghostscript" in err:
+            print("   💡 Try: sudo apt install ghostscript")
+        elif "already has text" in err:
+            print("   💡 Try: Add force_ocr=True or use --redo-ocr")
+        elif "not a valid pdf" in err:
+            print("   💡 PDF may be corrupted - try re-downloading")
         raise
-    return output_pdf
-
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("input", help="Input PDF file")
-    parser.add_argument("output", help="Output PDF file")
-    parser.add_argument("--lang", default="eng", help="OCR language (eng, ben, eng+ben)")
-    args = parser.parse_args()
-    ocr_pdf_to_pdf(args.input, args.output, args.lang)
