@@ -147,10 +147,22 @@ def main():
                 ocr_pdf(pdf_path, ocr_path, lang=ocr_lang, force=False)
                 print(f"✓ Searchable PDF created: {ocr_path}")
             except Exception as e:
-                print(f"OCR failed: {e}")
+                error_msg = str(e)
+                if "already has text" in error_msg or "PriorOcrFoundError" in error_msg:
+                    force_choice = input("PDF may contain hidden text. Force OCR anyway? (y/n): ").strip().lower()
+                    if force_choice.startswith('y'):
+                        try:
+                            ocr_pdf(pdf_path, ocr_path, lang=ocr_lang, force=True)
+                            print(f"✓ Searchable PDF created (forced): {ocr_path}")
+                        except Exception as e2:
+                            print(f"OCR failed even with force: {e2}")
+                    else:
+                        print("OCR skipped.")
+                else:
+                    print(f"OCR failed: {e}")
 
     # 9. Chapter splitting (optional)
-    split_choice = input("\nSplit into chapters using advanced detection? (y/n): ").strip().lower()
+    split_choice = input("\nSplit into chapters/units using advanced detection? (y/n): ").strip().lower()
     if split_choice.startswith('y'):
         try:
             from splitter import detect_chapter_pages_advanced, split_pdf_by_pages
@@ -160,11 +172,11 @@ def main():
 
         # Use OCR'd PDF if available, else original
         source_pdf = ocr_path if os.path.exists(ocr_path) else pdf_path
-        print("Analyzing PDF for chapter boundaries...")
+        print("Analyzing PDF for chapter/unit boundaries...")
         pages = detect_chapter_pages_advanced(source_pdf, language)
 
         if not pages:
-            print("❌ No chapter starts detected automatically.")
+            print("❌ No chapter/unit starts detected automatically.")
             manual = input("Enter page numbers manually (1-indexed, comma-separated): ").strip()
             if manual:
                 try:
@@ -175,9 +187,9 @@ def main():
 
         if pages:
             split_pdf_by_pages(source_pdf, chapters_dir, pages)
-            print(f"✓ Split into {len(pages)} chapters in: {chapters_dir}")
+            print(f"✓ Split into {len(pages)} sections in: {chapters_dir}")
         else:
-            print("No chapters to split.")
+            print("No sections to split.")
 
     print("\nDone.")
 
