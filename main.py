@@ -29,19 +29,6 @@ def download_pdf(url, save_path):
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()
 
-def find_table(soup, language):
-    """Helper to find Bangla or English table (copy of scraper's internal)."""
-    for table in soup.find_all("table"):
-        headers = [th.get_text(strip=True).lower() for th in table.find_all("th")]
-        header_text = " ".join(headers)
-        if language == 'bangla':
-            if re.search(r"ক্রমিক|বাংলা", header_text):
-                return table
-        else:
-            if re.search(r"(sl|no\.?|sl no|english)", header_text):
-                return table
-    return None
-
 def main():
     # 1. Get class list
     classes = scraper.get_class_links()
@@ -67,11 +54,10 @@ def main():
     class_folder = sanitize_filename(class_title)
     print(f"\nSelected: {class_title}\nURL: {class_url}")
 
-    # 3. Detect available languages
-    resp = requests.get(class_url, headers=HEADERS)
-    soup = BeautifulSoup(resp.text, "html.parser")
-    has_bangla = bool(find_table(soup, 'bangla'))
-    has_english = bool(find_table(soup, 'english'))
+    # 3. Detect available languages (cached)
+    lang_info = scraper.get_language_availability(class_url)
+    has_bangla = lang_info.get('bangla', False)
+    has_english = lang_info.get('english', False)
 
     if has_bangla and has_english:
         lang_choice = input("\nBoth Bangla and English available. Which version? (b/e): ").strip().lower()
@@ -125,15 +111,18 @@ def main():
     book_name, pdf_url = books[idx]
     print(f"\nProcessing: {book_name}")
 
-    # 6. Prepare directories
+    # 6. Prepare directories: books/class/language/book-name/
     lang_dir = "bangla" if language == 'bangla' else "english"
-    base_dir = os.path.join(BOOKS_DIR, class_folder, lang_dir)
-    non_ocr_dir = os.path.join(base_dir, "non_ocr")
-    ocr_dir = os.path.join(base_dir, "ocr")
+    safe_book_name = sanitize_filename(book_name)
+    book_base_dir = os.path.join(BOOKS_DIR, class_folder, lang_dir, safe_book_name)
+    
+    original_dir = os.path.join(book_base_dir, "original")
+    ocr_dir = os.path.join(book_base_dir, "ocr")
+    chapters_dir = os.path.join(book_base_dir, "chapters")
 
-    safe_name = sanitize_filename(book_name) + ".pdf"
-    pdf_path = os.path.join(non_ocr_dir, safe_name)
-    ocr_path = os.path.join(ocr_dir, safe_name)
+    pdf_filename = safe_book_name + ".pdf"
+    pdf_path = os.path.join(original_dir, pdf_filename)
+    ocr_path = os.path.join(ocr_dir, pdf_filename)
 
     # 7. Download if needed
     if not download_pdf(pdf_url, pdf_path):
@@ -185,8 +174,6 @@ def main():
                     pages = []
 
         if pages:
-            # Book-specific chapters folder
-            chapters_dir = os.path.join(base_dir, f"{safe_name.replace('.pdf', '')}_chapters")
             split_pdf_by_pages(source_pdf, chapters_dir, pages)
             print(f"✓ Split into {len(pages)} chapters in: {chapters_dir}")
         else:

@@ -88,7 +88,7 @@ def get_class_links(force_refresh=False):
     print(f"Cached {len(class_links)} class links.")
     return class_links
 
-# ---------- Download links ----------
+# ---------- Language availability ----------
 def _find_table(soup, language):
     """Return the table element for the given language (bangla/english)."""
     for table in soup.find_all("table"):
@@ -102,6 +102,31 @@ def _find_table(soup, language):
                 return table
     return None
 
+def get_language_availability(class_url, force_refresh=False):
+    """
+    Return dict like {'bangla': True/False, 'english': True/False} for a class page.
+    Cached per URL for 24h.
+    """
+    cache = _load_cache()
+    cache_key = f"langs:{class_url}"
+    entry = cache.get(cache_key, {})
+
+    if not force_refresh and _is_fresh(entry):
+        return entry.get('data', {'bangla': False, 'english': False})
+
+    print(f"Fetching language availability for {class_url}...")
+    resp = requests.get(class_url, headers=HEADERS)
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    has_bangla = bool(_find_table(soup, 'bangla'))
+    has_english = bool(_find_table(soup, 'english'))
+
+    data = {'bangla': has_bangla, 'english': has_english}
+    cache[cache_key] = {'timestamp': time.time(), 'data': data}
+    _save_cache(cache)
+    return data
+
+# ---------- Download links ----------
 def scrape_download_links(class_url, language='bangla', force_refresh=False):
     """
     Return list of [textbook_name, download_url] for the given class URL and language.
@@ -192,11 +217,10 @@ def main():
     selected_title, selected_url = classes[choice - 1]
     print(f"\nSelected: {selected_title}\nURL: {selected_url}")
 
-    # Detect languages
-    resp = requests.get(selected_url, headers=HEADERS)
-    soup = BeautifulSoup(resp.text, "html.parser")
-    has_bangla = bool(_find_table(soup, 'bangla'))
-    has_english = bool(_find_table(soup, 'english'))
+    # Detect languages (using cache)
+    lang_info = get_language_availability(selected_url)
+    has_bangla = lang_info.get('bangla', False)
+    has_english = lang_info.get('english', False)
 
     if has_bangla and has_english:
         lang_choice = input("\nBoth Bangla and English available. Which version? (b/e): ").strip().lower()
