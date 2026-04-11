@@ -179,7 +179,7 @@ def main():
 
         source_pdf = ocr_path if os.path.exists(ocr_path) else pdf_path
         print("Analyzing PDF for chapter/unit boundaries...")
-        pages = detect_chapter_pages_advanced(source_pdf, language)
+        pages = detect_chapter_pages_advanced(source_pdf, language, debug=True)
 
         if not pages:
             print("❌ No chapter/unit starts detected automatically.")

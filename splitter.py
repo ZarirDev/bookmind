@@ -6,29 +6,62 @@ def normalize_text(text):
     """Replace newlines and multiple spaces with a single space."""
     return re.sub(r'\s+', ' ', text)
 
-def detect_chapter_pages_advanced(pdf_path, language='english'):
+def extract_chapter_info(match_text, language='english'):
+    """Return (type, number) where type is 'chapter' or 'unit'."""
+    if language == 'english':
+        m = re.search(r'\b(Unit|Chapter)[\s:\-–—]+([^\s\.]+)', match_text, re.IGNORECASE)
+    else:
+        m = re.search(r'(অধ্যায়|ইউনিট)[\s:\-–—]*([^\s\.]+)', match_text, re.IGNORECASE)
+    if m:
+        typ = m.group(1).lower()
+        num = m.group(2).lower()
+        # Normalize type to 'unit' or 'chapter'
+        if 'unit' in typ or 'ইউনিট' in typ:
+            return ('unit', num)
+        else:
+            return ('chapter', num)
+    return (None, None)
+
+def detect_chapter_pages_advanced(pdf_path, language='english', debug=False):
     """
-    Relaxed chapter/unit detection.
+    Chapter/unit detection with type-aware acceptance.
+    - Unit headings: accepted without requiring 'question' in previous pages.
+    - Chapter headings: require 'question' in previous 5 pages.
+    - First heading always accepted.
     """
     doc = fitz.open(pdf_path)
     total_pages = len(doc)
 
     if language == 'english':
-        heading_pattern = re.compile(
-            r'\b(Unit|Chapter)\s+(\d{1,2}|One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|'
+        heading_plain = re.compile(
+            r'\b(Unit|Chapter)[\s:\-–—]+(\d{1,2}|One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|'
             r'Eleven|Twelve|Thirteen|Fourteen|Fifteen|Sixteen|Seventeen|Eighteen|Nineteen|'
             r'Twenty|Twenty[- ]One|Twenty[- ]Two|Twenty[- ]Three|Twenty[- ]Four|'
             r'Twenty[- ]Five|Twenty[- ]Six|Twenty[- ]Seven|Twenty[- ]Eight|'
             r'Twenty[- ]Nine|Thirty)\b(?!\.)',
             re.IGNORECASE
         )
+        heading_period_ok = re.compile(
+            r'\b(Unit|Chapter)[\s:\-–—]+(\d{1,2}|One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|'
+            r'Eleven|Twelve|Thirteen|Fourteen|Fifteen|Sixteen|Seventeen|Eighteen|Nineteen|'
+            r'Twenty|Twenty[- ]One|Twenty[- ]Two|Twenty[- ]Three|Twenty[- ]Four|'
+            r'Twenty[- ]Five|Twenty[- ]Six|Twenty[- ]Seven|Twenty[- ]Eight|'
+            r'Twenty[- ]Nine|Thirty)\b',
+            re.IGNORECASE
+        )
         question_pattern = re.compile(r'\bquestion\b', re.IGNORECASE)
         contents_pattern = re.compile(r'\bContents\b', re.IGNORECASE)
     else:
-        heading_pattern = re.compile(
-            r'(অধ্যায়|ইউনিট)\s*([০-৯\d]{1,2}|প্রথম|দ্বিতীয়|তৃতীয়|চতুর্থ|পঞ্চম|ষষ্ঠ|সপ্তম|অষ্টম|নবম|দশম|'
+        heading_plain = re.compile(
+            r'(অধ্যায়|ইউনিট)[\s:\-–—]*([০-৯\d]{1,2}|প্রথম|দ্বিতীয়|তৃতীয়|চতুর্থ|পঞ্চম|ষষ্ঠ|সপ্তম|অষ্টম|নবম|দশম|'
             r'এগারো|বারো|তেরো|চৌদ্দ|পনেরো|ষোল|সতেরো|আঠারো|উনিশ|বিশ|একুশ|বাইশ|তেইশ|চব্বিশ|পঁচিশ|'
             r'ছাব্বিশ|সাতাশ|আঠাশ|উনত্রিশ|ত্রিশ)(?!\.)',
+            re.IGNORECASE
+        )
+        heading_period_ok = re.compile(
+            r'(অধ্যায়|ইউনিট)[\s:\-–—]*([০-৯\d]{1,2}|প্রথম|দ্বিতীয়|তৃতীয়|চতুর্থ|পঞ্চম|ষষ্ঠ|সপ্তম|অষ্টম|নবম|দশম|'
+            r'এগারো|বারো|তেরো|চৌদ্দ|পনেরো|ষোল|সতেরো|আঠারো|উনিশ|বিশ|একুশ|বাইশ|তেইশ|চব্বিশ|পঁচিশ|'
+            r'ছাব্বিশ|সাতাশ|আঠাশ|উনত্রিশ|ত্রিশ)',
             re.IGNORECASE
         )
         question_pattern = re.compile(r'প্রশ্ন', re.IGNORECASE)
@@ -36,59 +69,89 @@ def detect_chapter_pages_advanced(pdf_path, language='english'):
 
     chapter_starts = []
     found_first_heading = False
+    seen_numbers = set()
+    header_occurrences = {}  # key: (type, number) -> list of page numbers
 
+    # First pass: collect all heading occurrences
     for page_num in range(total_pages):
-        page = doc[page_num]
-        raw_text = page.get_text("text")
-        text = normalize_text(raw_text)
-
-        if len(text.strip()) < 50:
+        text = normalize_text(doc[page_num].get_text("text"))
+        if len(text) < 50:
+            continue
+        first_part = text[:200].lower()
+        if contents_pattern.search(first_part):
             continue
 
-        if contents_pattern.search(text):
+        matches = list(heading_plain.finditer(text))
+        if not matches:
+            matches = list(heading_period_ok.finditer(text))
+
+        for match in matches:
+            typ, num = extract_chapter_info(match.group(0), language)
+            if typ and num:
+                key = (typ, num)
+                if key not in header_occurrences:
+                    header_occurrences[key] = []
+                header_occurrences[key].append(page_num)
+
+    # Second pass: decide which pages to accept
+    for (typ, num), pages in header_occurrences.items():
+        if not pages:
+            continue
+        candidate_page = pages[0]
+
+        if not found_first_heading:
+            chapter_starts.append(candidate_page)
+            found_first_heading = True
+            seen_numbers.add((typ, num))
+            if debug:
+                print(f"Page {candidate_page+1}: ACCEPTED as first {typ} ({num})")
             continue
 
-        heading_matches = list(heading_pattern.finditer(text))
-        if len(heading_matches) > 1:
-            continue
-
-        if heading_matches:
-            if not found_first_heading:
-                chapter_starts.append(page_num)
-                found_first_heading = True
-                continue
-
+        # For chapters, require 'question' proximity; for units, accept immediately
+        if typ == 'unit':
+            accept = True
+            reason = f"unit ({num})"
+        else:
+            # Check for 'question' in previous 5 pages (including current)
             question_found = False
-            start_lookback = max(0, page_num - 4)
-            for lookback_page in range(start_lookback, page_num):
-                lookback_text = normalize_text(doc[lookback_page].get_text("text"))
-                if question_pattern.search(lookback_text):
+            start_lookback = max(0, candidate_page - 5)
+            for lookback in range(start_lookback, candidate_page + 1):
+                if question_pattern.search(normalize_text(doc[lookback].get_text("text"))):
                     question_found = True
                     break
+            accept = question_found
+            reason = f"chapter ({num}) - {'question found' if accept else 'no question'}"
 
-            if question_found:
-                chapter_starts.append(page_num)
+        if accept:
+            chapter_starts.append(candidate_page)
+            seen_numbers.add((typ, num))
+            if debug:
+                print(f"Page {candidate_page+1}: ACCEPTED {reason}")
+        else:
+            if debug:
+                print(f"Page {candidate_page+1}: REJECTED {reason}")
 
     doc.close()
+    chapter_starts = sorted(set(chapter_starts))
 
-    # If we got too few chapters, fall back to simple heading detection
     if len(chapter_starts) <= 2:
         print("⚠ Advanced detection found few sections; using simple heading detection.")
-        chapter_starts = _detect_headings_simple(pdf_path, language)
+        chapter_starts = _detect_headings_simple(pdf_path, language, debug)
+
+    if debug:
+        print(f"\nFinal detected starts (1-indexed): {[p+1 for p in chapter_starts]}")
 
     return chapter_starts
 
-def _detect_headings_simple(pdf_path, language='english'):
-    """
-    Simple heading detection: takes all heading occurrences
-    (skipping TOC and multi‑heading pages).
-    """
+def _detect_headings_simple(pdf_path, language='english', debug=False):
+    """Simple fallback: first occurrence of each heading number."""
     doc = fitz.open(pdf_path)
     starts = []
+    seen = set()
 
     if language == 'english':
         pattern = re.compile(
-            r'\b(Unit|Chapter)\s+(\d{1,2}|One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|'
+            r'\b(Unit|Chapter)[\s:\-–—]+(\d{1,2}|One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|'
             r'Eleven|Twelve|Thirteen|Fourteen|Fifteen|Sixteen|Seventeen|Eighteen|Nineteen|'
             r'Twenty|Twenty[- ]One|Twenty[- ]Two|Twenty[- ]Three|Twenty[- ]Four|'
             r'Twenty[- ]Five|Twenty[- ]Six|Twenty[- ]Seven|Twenty[- ]Eight|'
@@ -98,26 +161,33 @@ def _detect_headings_simple(pdf_path, language='english'):
         contents_pattern = re.compile(r'\bContents\b', re.IGNORECASE)
     else:
         pattern = re.compile(
-            r'(অধ্যায়|ইউনিট)\s*([০-৯\d]{1,2}|প্রথম|দ্বিতীয়|তৃতীয়|চতুর্থ|পঞ্চম|ষষ্ঠ|সপ্তম|অষ্টম|নবম|দশম|'
+            r'(অধ্যায়|ইউনিট)[\s:\-–—]*([০-৯\d]{1,2}|প্রথম|দ্বিতীয়|তৃতীয়|চতুর্থ|পঞ্চম|ষষ্ঠ|সপ্তম|অষ্টম|নবম|দশম|'
             r'এগারো|বারো|তেরো|চৌদ্দ|পনেরো|ষোল|সতেরো|আঠারো|উনিশ|বিশ|একুশ|বাইশ|তেইশ|চব্বিশ|পঁচিশ|'
             r'ছাব্বিশ|সাতাশ|আঠাশ|উনত্রিশ|ত্রিশ)',
             re.IGNORECASE
         )
         contents_pattern = re.compile(r'সূচিপত্র|Contents', re.IGNORECASE)
 
+    header_occurrences = {}
     for page_num in range(len(doc)):
         text = normalize_text(doc[page_num].get_text("text"))
-
-        if contents_pattern.search(text):
+        first_part = text[:200].lower()
+        if contents_pattern.search(first_part):
             continue
+        for match in pattern.finditer(text):
+            typ, num = extract_chapter_info(match.group(0), language)
+            if typ and num:
+                key = (typ, num)
+                if key not in header_occurrences:
+                    header_occurrences[key] = []
+                header_occurrences[key].append(page_num)
 
-        matches = list(pattern.finditer(text))
-        if len(matches) > 1:
-            continue
+    for key, pages in header_occurrences.items():
+        if pages and key not in seen:
+            starts.append(pages[0])
+            seen.add(key)
 
-        if matches:
-            starts.append(page_num)
-
+    starts.sort()
     doc.close()
     return starts
 
