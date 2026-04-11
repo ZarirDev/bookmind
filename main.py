@@ -9,20 +9,74 @@ from ocr import ocr_pdf, check_dependencies, get_tesseract_langs, pdf_has_text
 BOOKS_DIR = "books"
 HEADERS = scraper.HEADERS
 
+def is_pdf_content(response):
+    content_type = response.headers.get('Content-Type', '').lower()
+    if 'application/pdf' in content_type:
+        return True
+    content_start = response.content[:8]
+    if content_start.startswith(b'%PDF'):
+        return True
+    return False
+
+def extract_direct_pdf_url(html_content, base_url=None):
+    soup = BeautifulSoup(html_content, 'html.parser')
+    download_input = soup.find('input', {'id': 'downloadURL'})
+    if download_input and download_input.get('value'):
+        return download_input['value']
+    download_link = soup.find('a', {'id': 'downloadFile'})
+    if download_link and download_link.get('href'):
+        href = download_link['href']
+        if href.startswith('http'):
+            return href
+        elif base_url:
+            from urllib.parse import urljoin
+            return urljoin(base_url, href)
+    for a in soup.find_all('a', href=True):
+        if '/download' in a['href']:
+            href = a['href']
+            if href.startswith('http'):
+                return href
+            elif base_url:
+                from urllib.parse import urljoin
+                return urljoin(base_url, href)
+    return None
+
 def download_pdf(url, save_path):
-    """Download a PDF if not already present."""
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     if os.path.exists(save_path):
         print(f"  Already downloaded: {os.path.basename(save_path)}")
         return True
     try:
-        resp = requests.get(url, stream=True, timeout=30)
+        resp = requests.get(url, headers=HEADERS, stream=True, timeout=30)
         resp.raise_for_status()
-        with open(save_path, 'wb') as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
-        print(f"  Downloaded: {os.path.basename(save_path)}")
-        return True
+        if is_pdf_content(resp):
+            with open(save_path, 'wb') as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print(f"  Downloaded: {os.path.basename(save_path)}")
+            return True
+        content_type = resp.headers.get('Content-Type', '').lower()
+        if 'text/html' in content_type or resp.text.strip().startswith('<!DOCTYPE'):
+            print("  Detected HTML landing page, extracting direct PDF link...")
+            direct_url = extract_direct_pdf_url(resp.text, base_url=url)
+            if not direct_url:
+                print("  Failed to extract direct PDF link.")
+                return False
+            print(f"  Found direct link: {direct_url}")
+            pdf_resp = requests.get(direct_url, headers=HEADERS, stream=True, timeout=60)
+            pdf_resp.raise_for_status()
+            if is_pdf_content(pdf_resp):
+                with open(save_path, 'wb') as f:
+                    for chunk in pdf_resp.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                print(f"  Downloaded: {os.path.basename(save_path)}")
+                return True
+            else:
+                print("  Direct link did not return a PDF.")
+                return False
+        else:
+            print(f"  Unexpected content type: {content_type}")
+            return False
     except Exception as e:
         print(f"  Failed: {e}")
         return False
@@ -30,8 +84,18 @@ def download_pdf(url, save_path):
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()
 
+def get_book_type(book_name, language):
+    """Determine special book type for splitting/OCR."""
+    name_lower = book_name.lower()
+    # Check grammar first (before literature)
+    if 'grammar' in name_lower or 'ব্যাকরণ' in book_name:
+        return 'bangla_grammar'
+    # Check literature
+    if language == 'english' and 'bangla' in name_lower and 'bangladesh' not in name_lower:
+        return 'bangla_lit'
+    return 'default'
+
 def main():
-    # 1. Get class list
     classes = scraper.get_class_links()
     if not classes:
         print("No class pages found.")
@@ -41,7 +105,6 @@ def main():
     for i, (title, _) in enumerate(classes, 1):
         print(f"{i}. {title}")
 
-    # 2. Select class
     while True:
         try:
             choice = int(input("\nEnter the number of the class page: "))
@@ -55,7 +118,6 @@ def main():
     class_folder = sanitize_filename(class_title)
     print(f"\nSelected: {class_title}\nURL: {class_url}")
 
-    # 3. Detect available languages (cached)
     lang_info = scraper.get_language_availability(class_url)
     has_bangla = lang_info.get('bangla', False)
     has_english = lang_info.get('english', False)
@@ -73,7 +135,6 @@ def main():
         print("No book tables found.")
         return
 
-    # 4. Get all books for that language
     books = scraper.scrape_download_links(class_url, language)
     if not books:
         print("No books found.")
@@ -94,7 +155,6 @@ def main():
     for i, (name, _) in enumerate(books, 1):
         print(f"{i}. {name}")
 
-    # 5. Select a single book
     if len(books) == 1:
         idx = 0
     else:
@@ -111,11 +171,10 @@ def main():
     book_name, pdf_url = books[idx]
     print(f"\nProcessing: {book_name}")
 
-    # 6. Prepare directories: books/class/language/book-name/
     lang_dir = "bangla" if language == 'bangla' else "english"
     safe_book_name = sanitize_filename(book_name)
     book_base_dir = os.path.join(BOOKS_DIR, class_folder, lang_dir, safe_book_name)
-    
+
     original_dir = os.path.join(book_base_dir, "original")
     ocr_dir = os.path.join(book_base_dir, "ocr")
     chapters_dir = os.path.join(book_base_dir, "chapters")
@@ -124,21 +183,20 @@ def main():
     pdf_path = os.path.join(original_dir, pdf_filename)
     ocr_path = os.path.join(ocr_dir, pdf_filename)
 
-    # 7. Download if needed
     if not download_pdf(pdf_url, pdf_path):
         print("Download failed, exiting.")
         return
 
-    # 8. OCR (optional, smart detection)
+    book_type = get_book_type(book_name, language)
+
     ocr_enabled = input("\nGenerate searchable (OCR) PDF? (y/n): ").strip().lower().startswith('y')
     if ocr_enabled:
         tess_ok, gs_ok = check_dependencies()
         if not (tess_ok and gs_ok):
-            print("⚠ OCR dependencies missing. Install Tesseract and Ghostscript.")
+            print("⚠ OCR dependencies missing.")
         elif os.path.exists(ocr_path):
             print(f"✓ Searchable PDF already exists: {ocr_path}")
         else:
-            # Check if original already has text
             if pdf_has_text(pdf_path):
                 print("ℹ PDF already contains selectable text. Skipping OCR.")
                 os.makedirs(os.path.dirname(ocr_path), exist_ok=True)
@@ -146,6 +204,9 @@ def main():
                 print(f"✓ Copied to OCR folder: {ocr_path}")
             else:
                 ocr_lang = 'eng' if language == 'english' else 'ben'
+                if book_type in ('bangla_lit', 'bangla_grammar'):
+                    ocr_lang = 'ben'
+                    print(f"  Using Bengali OCR for {book_type} book.")
                 installed = get_tesseract_langs()
                 if ocr_lang not in installed and ocr_lang != 'eng':
                     print(f"⚠ Tesseract language '{ocr_lang}' not installed. Falling back to English.")
@@ -168,21 +229,30 @@ def main():
                     else:
                         print(f"OCR failed: {e}")
 
-    # 9. Chapter splitting (optional)
-    split_choice = input("\nSplit into chapters/units using advanced detection? (y/n): ").strip().lower()
+    split_choice = input("\nSplit into chapters/units? (y/n): ").strip().lower()
     if split_choice.startswith('y'):
         try:
-            from splitter import detect_chapter_pages_advanced, split_pdf_by_pages
+            from splitter import (
+                detect_chapter_pages_advanced,
+                detect_bangla_literature_chapters,
+                detect_bangla_grammar_chapters,
+                split_pdf_by_pages
+            )
         except ImportError:
             print("❌ PyMuPDF not installed. Run: pip install PyMuPDF")
             return
 
         source_pdf = ocr_path if os.path.exists(ocr_path) else pdf_path
-        print("Analyzing PDF for chapter/unit boundaries...")
-        pages = detect_chapter_pages_advanced(source_pdf, language, debug=True)
+        print("Analyzing PDF for chapter boundaries...")
+        if book_type == 'bangla_lit':
+            pages = detect_bangla_literature_chapters(source_pdf, debug=True)
+        elif book_type == 'bangla_grammar':
+            pages = detect_bangla_grammar_chapters(source_pdf, debug=True)
+        else:
+            pages = detect_chapter_pages_advanced(source_pdf, language, debug=True)
 
         if not pages:
-            print("❌ No chapter/unit starts detected automatically.")
+            print("❌ No chapter starts detected automatically.")
             manual = input("Enter page numbers manually (1-indexed, comma-separated): ").strip()
             if manual:
                 try:

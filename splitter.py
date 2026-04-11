@@ -22,7 +22,7 @@ def extract_chapter_info(match_text, language='english'):
             return ('chapter', num)
     return (None, None)
 
-def detect_chapter_pages_advanced(pdf_path, language='english', debug=False):
+def detect_chapter_pages_advanced(pdf_path, language='english', debug=True):
     """
     Chapter/unit detection with type-aware acceptance.
     - Unit headings: accepted without requiring 'question' in previous pages.
@@ -143,7 +143,7 @@ def detect_chapter_pages_advanced(pdf_path, language='english', debug=False):
 
     return chapter_starts
 
-def _detect_headings_simple(pdf_path, language='english', debug=False):
+def _detect_headings_simple(pdf_path, language='english', debug=True):
     """Simple fallback: first occurrence of each heading number."""
     doc = fitz.open(pdf_path)
     starts = []
@@ -191,6 +191,47 @@ def _detect_headings_simple(pdf_path, language='english', debug=False):
     doc.close()
     return starts
 
+def detect_bangla_grammar_chapters(pdf_path, debug=False):
+    """
+    Special detection for Bangla grammar books.
+    Looks for 'পরিচ্ছেদ' followed by digits, tolerating OCR noise/symbols.
+    """
+    doc = fitz.open(pdf_path)
+    total_pages = len(doc)
+
+    # Pattern: "প" + anything + "রি" + anything + "চ্ছে" + anything + "দ" + optional punctuation + digits
+    pattern = re.compile(
+        r'প.*?রি.*?চ্ছে.*?দ\s*[ঃ\-\.]?\s*([০-৯\d]+)',
+        re.IGNORECASE
+    )
+    chapter_starts = []
+    found_first = False
+
+    for page_num in range(total_pages):
+        text = normalize_text(doc[page_num].get_text("text"))
+        if debug and page_num < 10:
+            snippet = text[:150].replace('\n', ' ')
+            print(f"Page {page_num+1}: {snippet}...")
+
+        match = pattern.search(text)
+        if match:
+            if debug:
+                print(f"  -> Found heading on page {page_num+1}: {match.group(0)}")
+            if not found_first:
+                chapter_starts.append(page_num)
+                found_first = True
+            else:
+                chapter_starts.append(page_num)
+
+    doc.close()
+
+    if not chapter_starts:
+        print("⚠ No 'পরিচ্ছেদ' headings found.")
+    elif debug:
+        print(f"Bangla grammar chapters at pages (1-indexed): {[p+1 for p in chapter_starts]}")
+
+    return chapter_starts
+
 def split_pdf_by_pages(input_pdf, output_dir, split_pages, base_name="Section"):
     """Split PDF at the given 0-indexed start pages."""
     os.makedirs(output_dir, exist_ok=True)
@@ -214,3 +255,26 @@ def split_pdf_by_pages(input_pdf, output_dir, split_pages, base_name="Section"):
 
     doc.close()
     return output_paths
+
+def detect_bangla_literature_chapters(pdf_path, debug=True):
+    """
+    Special detection for Bangla literature books.
+    Splits at pages containing 'সৃজনশীল প্রশ্ন' (creative questions).
+    The next page after such a marker becomes a new chapter start.
+    Chapter 1 always starts at page 0.
+    """
+    doc = fitz.open(pdf_path)
+    total_pages = len(doc)
+    creative_pattern = re.compile(r'সৃজনশীল প্রশ্ন', re.IGNORECASE)
+
+    chapter_starts = [0]
+    for page_num in range(total_pages):
+        text = normalize_text(doc[page_num].get_text("text"))
+        if creative_pattern.search(text):
+            if page_num + 1 < total_pages:
+                chapter_starts.append(page_num + 1)
+    doc.close()
+    chapter_starts = sorted(set(chapter_starts))
+    if debug:
+        print(f"Bangla literature chapters at pages (1-indexed): {[p+1 for p in chapter_starts]}")
+    return chapter_starts
