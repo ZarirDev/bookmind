@@ -3,6 +3,7 @@ import re
 import requests
 from bs4 import BeautifulSoup
 import scraper
+from ocr import ocr_pdf, check_dependencies, get_tesseract_langs
 
 BOOKS_DIR = "books"
 HEADERS = scraper.HEADERS
@@ -92,7 +93,6 @@ def main():
         return
 
     # Ensure each book is a list/tuple of (name, url)
-    # In case some entries are malformed, filter them
     valid_books = []
     for b in books:
         if isinstance(b, (list, tuple)) and len(b) >= 2:
@@ -139,6 +139,58 @@ def main():
     if not download_pdf(pdf_url, pdf_path):
         print("Download failed, exiting.")
         return
+
+    # 8. OCR (optional, skip if exists)
+    ocr_enabled = input("\nGenerate searchable (OCR) PDF? (y/n): ").strip().lower().startswith('y')
+    if ocr_enabled:
+        tess_ok, gs_ok = check_dependencies()
+        if not (tess_ok and gs_ok):
+            print("⚠ OCR dependencies missing. Install Tesseract and Ghostscript.")
+        elif os.path.exists(ocr_path):
+            print(f"✓ Searchable PDF already exists: {ocr_path}")
+        else:
+            ocr_lang = 'eng' if language == 'english' else 'ben'
+            installed = get_tesseract_langs()
+            if ocr_lang not in installed and ocr_lang != 'eng':
+                print(f"⚠ Tesseract language '{ocr_lang}' not installed. Falling back to English.")
+                ocr_lang = 'eng'
+            try:
+                ocr_pdf(pdf_path, ocr_path, lang=ocr_lang, force=False)
+                print(f"✓ Searchable PDF created: {ocr_path}")
+            except Exception as e:
+                print(f"OCR failed: {e}")
+
+    # 9. Chapter splitting (optional)
+    split_choice = input("\nSplit into chapters using advanced detection? (y/n): ").strip().lower()
+    if split_choice.startswith('y'):
+        try:
+            from splitter import detect_chapter_pages_advanced, split_pdf_by_pages
+        except ImportError:
+            print("❌ PyMuPDF not installed. Run: pip install PyMuPDF")
+            return
+
+        # Use OCR'd PDF if available, else original
+        source_pdf = ocr_path if os.path.exists(ocr_path) else pdf_path
+        print("Analyzing PDF for chapter boundaries...")
+        pages = detect_chapter_pages_advanced(source_pdf, language)
+
+        if not pages:
+            print("❌ No chapter starts detected automatically.")
+            manual = input("Enter page numbers manually (1-indexed, comma-separated): ").strip()
+            if manual:
+                try:
+                    pages = [int(p.strip()) - 1 for p in manual.split(',')]
+                except ValueError:
+                    print("Invalid input. Skipping split.")
+                    pages = []
+
+        if pages:
+            # Book-specific chapters folder
+            chapters_dir = os.path.join(base_dir, f"{safe_name.replace('.pdf', '')}_chapters")
+            split_pdf_by_pages(source_pdf, chapters_dir, pages)
+            print(f"✓ Split into {len(pages)} chapters in: {chapters_dir}")
+        else:
+            print("No chapters to split.")
 
     print("\nDone.")
 
