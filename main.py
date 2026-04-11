@@ -3,7 +3,6 @@ import re
 import requests
 from bs4 import BeautifulSoup
 import scraper
-from ocr import ocr_pdf_to_pdf
 
 BOOKS_DIR = "books"
 HEADERS = scraper.HEADERS
@@ -140,17 +139,6 @@ def main():
     if not download_pdf(pdf_url, pdf_path):
         print("Download failed, exiting.")
         return
-
-    # 8. OCR if not already done
-    if os.path.exists(ocr_path):
-        print(f"OCR already exists: {ocr_path}")
-    else:
-        try:
-            ocr_lang = 'eng' if language == 'english' else 'ben'
-            ocr_pdf_to_pdf(pdf_path, ocr_path, lang=ocr_lang)
-            print(f"OCR completed: {ocr_path}")
-        except Exception as e:
-            print(f"OCR failed: {e}")
 
     print("\nDone.")
 
