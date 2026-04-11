@@ -2,97 +2,126 @@ import re
 import os
 import fitz  # PyMuPDF
 
+def normalize_text(text):
+    """Replace newlines and multiple spaces with a single space."""
+    return re.sub(r'\s+', ' ', text)
+
 def detect_chapter_pages_advanced(pdf_path, language='english'):
     """
-    Advanced chapter/unit detection using heading + previous exercise check.
-    Supports 'Chapter' and 'Unit' headings.
-    Returns list of 0-indexed page numbers where chapters/units begin.
+    Relaxed chapter/unit detection.
     """
     doc = fitz.open(pdf_path)
     total_pages = len(doc)
 
-    # Patterns for English and Bangla
     if language == 'english':
         heading_pattern = re.compile(
-            r'\b(chapter|unit)\s*(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|'
-            r'eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|'
-            r'twenty|twenty[\s-]one|twenty[\s-]two|twenty[\s-]three|twenty[\s-]four|'
-            r'twenty[\s-]five|twenty[\s-]six|twenty[\s-]seven|twenty[\s-]eight|'
-            r'twenty[\s-]nine|thirty)\b',
+            r'\b(Unit|Chapter)\s+(\d{1,2}|One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|'
+            r'Eleven|Twelve|Thirteen|Fourteen|Fifteen|Sixteen|Seventeen|Eighteen|Nineteen|'
+            r'Twenty|Twenty[- ]One|Twenty[- ]Two|Twenty[- ]Three|Twenty[- ]Four|'
+            r'Twenty[- ]Five|Twenty[- ]Six|Twenty[- ]Seven|Twenty[- ]Eight|'
+            r'Twenty[- ]Nine|Thirty)\b(?!\.)',
             re.IGNORECASE
         )
-        exercise_pattern = re.compile(r'\bexercise\b', re.IGNORECASE)
-        mcq_pattern = re.compile(r'\b(multiple\s+choice\s+questions?|mcq)\b', re.IGNORECASE)
-    else:  # bangla
+        question_pattern = re.compile(r'\bquestion\b', re.IGNORECASE)
+        contents_pattern = re.compile(r'\bContents\b', re.IGNORECASE)
+    else:
         heading_pattern = re.compile(
             r'(অধ্যায়|ইউনিট)\s*([০-৯\d]{1,2}|প্রথম|দ্বিতীয়|তৃতীয়|চতুর্থ|পঞ্চম|ষষ্ঠ|সপ্তম|অষ্টম|নবম|দশম|'
             r'এগারো|বারো|তেরো|চৌদ্দ|পনেরো|ষোল|সতেরো|আঠারো|উনিশ|বিশ|একুশ|বাইশ|তেইশ|চব্বিশ|পঁচিশ|'
-            r'ছাব্বিশ|সাতাশ|আঠাশ|উনত্রিশ|ত্রিশ)',
+            r'ছাব্বিশ|সাতাশ|আঠাশ|উনত্রিশ|ত্রিশ)(?!\.)',
             re.IGNORECASE
         )
-        exercise_pattern = re.compile(r'অনুশীলনী|অনুশীলন', re.IGNORECASE)
-        mcq_pattern = re.compile(r'বহুনির্বাচনী|এমসিকিউ|mcq', re.IGNORECASE)
+        question_pattern = re.compile(r'প্রশ্ন', re.IGNORECASE)
+        contents_pattern = re.compile(r'সূচিপত্র|Contents', re.IGNORECASE)
 
     chapter_starts = []
     found_first_heading = False
 
     for page_num in range(total_pages):
         page = doc[page_num]
-        text = page.get_text("text")
+        raw_text = page.get_text("text")
+        text = normalize_text(raw_text)
 
         if len(text.strip()) < 50:
             continue
 
-        if heading_pattern.search(text):
+        if contents_pattern.search(text):
+            continue
+
+        heading_matches = list(heading_pattern.finditer(text))
+        if len(heading_matches) > 1:
+            continue
+
+        if heading_matches:
             if not found_first_heading:
-                if page_num > 2:  # Skip TOC/preface
-                    chapter_starts.append(page_num)
-                    found_first_heading = True
+                chapter_starts.append(page_num)
+                found_first_heading = True
                 continue
 
-            # Check previous up to 4 pages for exercise + MCQ
-            exercise_found = False
-            mcq_found = False
+            question_found = False
             start_lookback = max(0, page_num - 4)
             for lookback_page in range(start_lookback, page_num):
-                lookback_text = doc[lookback_page].get_text("text")
-                if exercise_pattern.search(lookback_text):
-                    exercise_found = True
-                if mcq_pattern.search(lookback_text):
-                    mcq_found = True
-                if exercise_found and mcq_found:
+                lookback_text = normalize_text(doc[lookback_page].get_text("text"))
+                if question_pattern.search(lookback_text):
+                    question_found = True
                     break
 
-            if exercise_found and mcq_found:
+            if question_found:
                 chapter_starts.append(page_num)
 
     doc.close()
 
-    # Fallback if advanced detection finds too few sections
-    if len(chapter_starts) <= 1:
+    # If we got too few chapters, fall back to simple heading detection
+    if len(chapter_starts) <= 2:
         print("⚠ Advanced detection found few sections; using simple heading detection.")
         chapter_starts = _detect_headings_simple(pdf_path, language)
 
     return chapter_starts
 
 def _detect_headings_simple(pdf_path, language='english'):
-    """Simple heading detection for Chapter/Unit."""
+    """
+    Simple heading detection: takes all heading occurrences
+    (skipping TOC and multi‑heading pages).
+    """
     doc = fitz.open(pdf_path)
     starts = []
-    patterns = {
-        'english': re.compile(r'\b(chapter|unit)\s+\d+\b', re.IGNORECASE),
-        'bangla': re.compile(r'(অধ্যায়|ইউনিট)\s*[০-৯\d]+|প্রথম|দ্বিতীয়|তৃতীয়|চতুর্থ|পঞ্চম|ষষ্ঠ|সপ্তম|অষ্টম|নবম|দশম')
-    }
-    pattern = patterns.get(language, patterns['english'])
+
+    if language == 'english':
+        pattern = re.compile(
+            r'\b(Unit|Chapter)\s+(\d{1,2}|One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|'
+            r'Eleven|Twelve|Thirteen|Fourteen|Fifteen|Sixteen|Seventeen|Eighteen|Nineteen|'
+            r'Twenty|Twenty[- ]One|Twenty[- ]Two|Twenty[- ]Three|Twenty[- ]Four|'
+            r'Twenty[- ]Five|Twenty[- ]Six|Twenty[- ]Seven|Twenty[- ]Eight|'
+            r'Twenty[- ]Nine|Thirty)\b',
+            re.IGNORECASE
+        )
+        contents_pattern = re.compile(r'\bContents\b', re.IGNORECASE)
+    else:
+        pattern = re.compile(
+            r'(অধ্যায়|ইউনিট)\s*([০-৯\d]{1,2}|প্রথম|দ্বিতীয়|তৃতীয়|চতুর্থ|পঞ্চম|ষষ্ঠ|সপ্তম|অষ্টম|নবম|দশম|'
+            r'এগারো|বারো|তেরো|চৌদ্দ|পনেরো|ষোল|সতেরো|আঠারো|উনিশ|বিশ|একুশ|বাইশ|তেইশ|চব্বিশ|পঁচিশ|'
+            r'ছাব্বিশ|সাতাশ|আঠাশ|উনত্রিশ|ত্রিশ)',
+            re.IGNORECASE
+        )
+        contents_pattern = re.compile(r'সূচিপত্র|Contents', re.IGNORECASE)
 
     for page_num in range(len(doc)):
-        text = doc[page_num].get_text("text")[:500]
-        if pattern.search(text):
+        text = normalize_text(doc[page_num].get_text("text"))
+
+        if contents_pattern.search(text):
+            continue
+
+        matches = list(pattern.finditer(text))
+        if len(matches) > 1:
+            continue
+
+        if matches:
             starts.append(page_num)
+
     doc.close()
     return starts
 
-def split_pdf_by_pages(input_pdf, output_dir, split_pages, base_name="Chapter"):
+def split_pdf_by_pages(input_pdf, output_dir, split_pages, base_name="Section"):
     """Split PDF at the given 0-indexed start pages."""
     os.makedirs(output_dir, exist_ok=True)
     doc = fitz.open(input_pdf)

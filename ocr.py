@@ -56,3 +56,20 @@ def ocr_pdf(input_pdf, output_pdf, lang='eng', force=False, backend='auto'):
         return ocr_pdf_with_ocrmypdf(input_pdf, output_pdf, lang, force)
     else:
         raise ValueError(f"Unknown backend: {backend}")
+
+def pdf_has_text(pdf_path, min_text_length=50):
+    """Check if a PDF already contains extractable text."""
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(pdf_path)
+        # Check first 5 pages
+        for page_num in range(min(5, len(doc))):
+            text = doc[page_num].get_text("text")
+            if len(text.strip()) > min_text_length:
+                doc.close()
+                return True
+        doc.close()
+        return False
+    except ImportError:
+        # PyMuPDF not installed, assume no text (will attempt OCR)
+        return False

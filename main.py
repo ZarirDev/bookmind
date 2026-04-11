@@ -1,9 +1,10 @@
 import os
 import re
 import requests
+import shutil
 from bs4 import BeautifulSoup
 import scraper
-from ocr import ocr_pdf, check_dependencies, get_tesseract_langs
+from ocr import ocr_pdf, check_dependencies, get_tesseract_langs, pdf_has_text
 
 BOOKS_DIR = "books"
 HEADERS = scraper.HEADERS
@@ -78,7 +79,6 @@ def main():
         print("No books found.")
         return
 
-    # Ensure each book is a list/tuple of (name, url)
     valid_books = []
     for b in books:
         if isinstance(b, (list, tuple)) and len(b) >= 2:
@@ -129,7 +129,7 @@ def main():
         print("Download failed, exiting.")
         return
 
-    # 8. OCR (optional, skip if exists)
+    # 8. OCR (optional, smart detection)
     ocr_enabled = input("\nGenerate searchable (OCR) PDF? (y/n): ").strip().lower().startswith('y')
     if ocr_enabled:
         tess_ok, gs_ok = check_dependencies()
@@ -138,28 +138,35 @@ def main():
         elif os.path.exists(ocr_path):
             print(f"✓ Searchable PDF already exists: {ocr_path}")
         else:
-            ocr_lang = 'eng' if language == 'english' else 'ben'
-            installed = get_tesseract_langs()
-            if ocr_lang not in installed and ocr_lang != 'eng':
-                print(f"⚠ Tesseract language '{ocr_lang}' not installed. Falling back to English.")
-                ocr_lang = 'eng'
-            try:
-                ocr_pdf(pdf_path, ocr_path, lang=ocr_lang, force=False)
-                print(f"✓ Searchable PDF created: {ocr_path}")
-            except Exception as e:
-                error_msg = str(e)
-                if "already has text" in error_msg or "PriorOcrFoundError" in error_msg:
-                    force_choice = input("PDF may contain hidden text. Force OCR anyway? (y/n): ").strip().lower()
-                    if force_choice.startswith('y'):
-                        try:
-                            ocr_pdf(pdf_path, ocr_path, lang=ocr_lang, force=True)
-                            print(f"✓ Searchable PDF created (forced): {ocr_path}")
-                        except Exception as e2:
-                            print(f"OCR failed even with force: {e2}")
+            # Check if original already has text
+            if pdf_has_text(pdf_path):
+                print("ℹ PDF already contains selectable text. Skipping OCR.")
+                os.makedirs(os.path.dirname(ocr_path), exist_ok=True)
+                shutil.copy2(pdf_path, ocr_path)
+                print(f"✓ Copied to OCR folder: {ocr_path}")
+            else:
+                ocr_lang = 'eng' if language == 'english' else 'ben'
+                installed = get_tesseract_langs()
+                if ocr_lang not in installed and ocr_lang != 'eng':
+                    print(f"⚠ Tesseract language '{ocr_lang}' not installed. Falling back to English.")
+                    ocr_lang = 'eng'
+                try:
+                    ocr_pdf(pdf_path, ocr_path, lang=ocr_lang, force=False)
+                    print(f"✓ Searchable PDF created: {ocr_path}")
+                except Exception as e:
+                    error_msg = str(e)
+                    if "already has text" in error_msg or "PriorOcrFoundError" in error_msg:
+                        force_choice = input("PDF may contain hidden text. Force OCR anyway? (y/n): ").strip().lower()
+                        if force_choice.startswith('y'):
+                            try:
+                                ocr_pdf(pdf_path, ocr_path, lang=ocr_lang, force=True)
+                                print(f"✓ Searchable PDF created (forced): {ocr_path}")
+                            except Exception as e2:
+                                print(f"OCR failed even with force: {e2}")
+                        else:
+                            print("OCR skipped.")
                     else:
-                        print("OCR skipped.")
-                else:
-                    print(f"OCR failed: {e}")
+                        print(f"OCR failed: {e}")
 
     # 9. Chapter splitting (optional)
     split_choice = input("\nSplit into chapters/units using advanced detection? (y/n): ").strip().lower()
@@ -170,7 +177,6 @@ def main():
             print("❌ PyMuPDF not installed. Run: pip install PyMuPDF")
             return
 
-        # Use OCR'd PDF if available, else original
         source_pdf = ocr_path if os.path.exists(ocr_path) else pdf_path
         print("Analyzing PDF for chapter/unit boundaries...")
         pages = detect_chapter_pages_advanced(source_pdf, language)
