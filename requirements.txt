@@ -3,3 +3,4 @@ beautifulsoup4
 ocrmypdf
 PyMuPDF
 groq
+python-dotenv

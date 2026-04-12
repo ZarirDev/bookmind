@@ -5,9 +5,19 @@ import shutil
 from bs4 import BeautifulSoup
 import scraper
 from ocr import ocr_pdf, check_dependencies, get_tesseract_langs, pdf_has_text
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 BOOKS_DIR = "books"
 HEADERS = scraper.HEADERS
+
+# Optional: warn if Groq key not set when summarisation is requested
+def check_groq_key():
+    if not os.environ.get("GROQ_API_KEY"):
+        print("⚠ GROQ_API_KEY not set. Summarisation will fail.")
+        print("  Set it with: export GROQ_API_KEY='your-key'")
 
 def is_pdf_content(response):
     content_type = response.headers.get('Content-Type', '').lower()
@@ -245,11 +255,11 @@ def main():
         source_pdf = ocr_path if os.path.exists(ocr_path) else pdf_path
         print("Analyzing PDF for chapter boundaries...")
         if book_type == 'bangla_lit':
-            pages = detect_bangla_literature_chapters(source_pdf, debug=True)
+            pages = detect_bangla_literature_chapters(source_pdf, debug=False)
         elif book_type == 'bangla_grammar':
-            pages = detect_bangla_grammar_chapters(source_pdf, debug=True)
+            pages = detect_bangla_grammar_chapters(source_pdf, debug=False)
         else:
-            pages = detect_chapter_pages_advanced(source_pdf, language, debug=True)
+            pages = detect_chapter_pages_advanced(source_pdf, language, debug=False)
 
         if not pages:
             print("❌ No chapter starts detected automatically.")
@@ -266,6 +276,42 @@ def main():
             print(f"✓ Split into {len(pages)} sections in: {chapters_dir}")
         else:
             print("No sections to split.")
+
+    # Summarization (optional)
+    summarise_choice = input("\nSummarise a chapter using Groq AI? (y/n): ").strip().lower()
+    if summarise_choice.startswith('y'):
+        if not os.environ.get("GROQ_API_KEY"):
+            print("⚠ GROQ_API_KEY environment variable not set.")
+            print("  Set it with: export GROQ_API_KEY='your-key'")
+        else:
+            try:
+                from summarise import summarise_chapter
+            except ImportError:
+                print("❌ summarise.py not found or missing 'groq' package.")
+            else:
+                if os.path.exists(chapters_dir):
+                    chapter_files = sorted([f for f in os.listdir(chapters_dir) if f.endswith('.pdf')])
+                    if not chapter_files:
+                        print("No chapter PDFs found. Split the book first.")
+                    else:
+                        print("\nAvailable chapters:")
+                        for i, f in enumerate(chapter_files, 1):
+                            print(f"{i}. {f}")
+                        while True:
+                            try:
+                                ch_choice = int(input(f"Enter chapter number to summarise (1-{len(chapter_files)}): "))
+                                if 1 <= ch_choice <= len(chapter_files):
+                                    break
+                                print(f"Enter a number between 1 and {len(chapter_files)}")
+                            except ValueError:
+                                print("Invalid input.")
+                        selected_chapter = chapter_files[ch_choice - 1]
+                        chapter_path = os.path.join(chapters_dir, selected_chapter)
+                        chapter_name = os.path.splitext(selected_chapter)[0]
+                        summary_dir = os.path.join(book_base_dir, "summarised")
+                        summarise_chapter(chapter_path, summary_dir, chapter_name)
+                else:
+                    print("No chapters directory found. Split the book first.")
 
     print("\nDone.")
 
