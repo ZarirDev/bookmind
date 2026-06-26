@@ -11,7 +11,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_FILE = os.path.join(SCRIPT_DIR, ".cache")
 CACHE_TTL = 86400  # 24 hours
 
-# ---------- Cache ----------
+# ---------- Cache helpers ----------
 def _load_cache():
     if not os.path.exists(CACHE_FILE):
         return {}
@@ -33,216 +33,242 @@ def _is_fresh(entry):
         return False
     return (time.time() - entry['timestamp']) < CACHE_TTL
 
-# ---------- Class list ----------
-def clean_title(raw_title):
-    """Remove Bengali text and extra separators."""
-    bengali_pattern = re.compile(r'[\u0980-\u09FF]+')
-    cleaned = bengali_pattern.sub('', raw_title)
-    cleaned = re.sub(r'[|–]', '', cleaned)
-    cleaned = cleaned.replace(" - NCTB Books", "").strip()
-    cleaned = re.sub(r'\s+', ' ', cleaned)
-    return cleaned
+# ---------- Category mapping ----------
+CATEGORY_MAP = {
+    "প্রাথমিক": "Primary",
+    "মাধ্যমিক": "Secondary",
+    "দাখিল": "Dakhil",
+    "ইবতেদায়ি": "Ibtedai"
+}
 
-def is_class_page(title):
-    """True if title contains 'class' and 'book' or 'dakhil' and 'book' (excluding syllabus)."""
-    title_lower = title.lower()
-    if "syllabus" in title_lower:
-        return False
-    return ("class" in title_lower and "book" in title_lower) or \
-           ("dakhil" in title_lower and "book" in title_lower)
+def _to_english_category(bangla_name):
+    return CATEGORY_MAP.get(bangla_name, bangla_name)  # fallback just in case
 
-def get_class_links(force_refresh=False):
-    """Return list of [cleaned_title, url] for all class textbook pages."""
-    cache = _load_cache()
-    class_cache = cache.get('class_links', {})
-
-    if not force_refresh and _is_fresh(class_cache):
-        print("Using cached class links (24h valid).")
-        return class_cache.get('data', [])
-
-    print("Fetching fresh class links from website...")
-    class_links = []
-    url = BASE_URL
-
-    while True:
-        resp = requests.get(url, headers=HEADERS)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        links = soup.select("h2.wp-block-post-title a")
-        if not links:
-            break
-
-        for a in links:
-            raw_title = a.get_text(strip=True)
-            if is_class_page(raw_title):
-                class_links.append([clean_title(raw_title), a["href"]])
-
-        next_link = soup.find("link", rel="next")
-        if next_link and next_link.get("href"):
-            url = next_link["href"]
-            time.sleep(1)
-        else:
-            break
-
-    cache['class_links'] = {'timestamp': time.time(), 'data': class_links}
-    _save_cache(cache)
-    print(f"Cached {len(class_links)} class links.")
-    return class_links
-
-# ---------- Language availability ----------
-def _find_table(soup, language):
-    """Return the table element for the given language (bangla/english)."""
-    for table in soup.find_all("table"):
-        headers = [th.get_text(strip=True).lower() for th in table.find_all("th")]
-        header_text = " ".join(headers)
-        if language == 'bangla':
-            if re.search(r"ক্রমিক|বাংলা", header_text):
-                return table
-        else:  # english
-            if re.search(r"(sl|no\.?|sl no|english)", header_text):
-                return table
-    return None
-
-def get_language_availability(class_url, force_refresh=False):
+def get_categories(force_refresh=False):
     """
-    Return dict like {'bangla': True/False, 'english': True/False} for a class page.
-    Cached per URL for 24h.
+    Returns list of [english_name, url] from the homepage category grid.
     """
     cache = _load_cache()
-    cache_key = f"langs:{class_url}"
-    entry = cache.get(cache_key, {})
+    key = 'categories'
+    entry = cache.get(key, {})
 
     if not force_refresh and _is_fresh(entry):
-        return entry.get('data', {'bangla': False, 'english': False})
-
-    print(f"Fetching language availability for {class_url}...")
-    resp = requests.get(class_url, headers=HEADERS)
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    has_bangla = bool(_find_table(soup, 'bangla'))
-    has_english = bool(_find_table(soup, 'english'))
-
-    data = {'bangla': has_bangla, 'english': has_english}
-    cache[cache_key] = {'timestamp': time.time(), 'data': data}
-    _save_cache(cache)
-    return data
-
-# ---------- Download links ----------
-def scrape_download_links(class_url, language='bangla', force_refresh=False):
-    """
-    Return list of [textbook_name, download_url] for the given class URL and language.
-    Cached per (URL, language) for 24h.
-    """
-    cache = _load_cache()
-    cache_key = f"downloads:{class_url}:{language}"
-    entry = cache.get(cache_key, {})
-
-    if not force_refresh and _is_fresh(entry):
-        print(f"Using cached download links for {class_url} ({language})")
+        print("Using cached categories (24h valid).")
         return entry.get('data', [])
 
-    print(f"Fetching fresh download links from {class_url} ({language})...")
+    print("Fetching fresh category links from homepage...")
+    categories = []
+    resp = requests.get(BASE_URL, headers=HEADERS)
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    grid = soup.select_one('.nctb-level-grid')
+    if grid:
+        for a in grid.find_all('a', class_='nctb-level-card'):
+            name_div = a.find('div', class_='nctb-level-name')
+            if name_div:
+                raw_name = name_div.get_text(strip=True)
+                eng_name = _to_english_category(raw_name)
+                url = a.get('href')
+                if url and not url.startswith('http'):
+                    url = BASE_URL + url
+                categories.append([eng_name, url])
+
+    cache[key] = {'timestamp': time.time(), 'data': categories}
+    _save_cache(cache)
+    print(f"Cached {len(categories)} categories.")
+    return categories
+
+# ---------- Class list inside a category ----------
+def _clean_class_title(raw_title):
+    """
+    Extract the English portion from e.g.
+    "Class 9 Book 2026 PDF | ৯ম শ্রেণির বই ২০২৬"
+    """
+    # Split on '|' and keep the first part
+    parts = raw_title.split('|')
+    english_part = parts[0].strip()
+    # Remove extra "PDF" duplicates, etc.
+    english_part = re.sub(r'\s+', ' ', english_part)
+    return english_part
+
+def get_class_links(category_url, force_refresh=False):
+    """
+    Returns list of [english_title, url] from a category page (cat-grid).
+    """
+    cache = _load_cache()
+    key = f"classes:{category_url}"
+    entry = cache.get(key, {})
+
+    if not force_refresh and _is_fresh(entry):
+        print(f"Using cached class links for {category_url}")
+        return entry.get('data', [])
+
+    print(f"Fetching fresh class links from {category_url}...")
+    classes = []
+    resp = requests.get(category_url, headers=HEADERS)
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    grid = soup.select_one('.cat-grid')
+    if grid:
+        for card in grid.find_all('a', class_='cat-card'):
+            title_div = card.find('div', class_='cat-title')
+            if title_div:
+                raw_title = title_div.get_text(strip=True)
+                eng_title = _clean_class_title(raw_title)
+                url = card.get('href')
+                if url and not url.startswith('http'):
+                    url = BASE_URL + url
+                classes.append([eng_title, url])
+
+    # Note: pagination can be added if needed.
+
+    cache[key] = {'timestamp': time.time(), 'data': classes}
+    _save_cache(cache)
+    print(f"Cached {len(classes)} classes for {category_url}")
+    return classes
+
+# ---------- Book extraction from a class page ----------
+def _extract_books_from_table(table):
+    """
+    From a <table> element, return list of [book_name, download_url].
+    """
+    books = []
+    rows = table.find_all("tr")
+    if len(rows) < 2:
+        return books
+    for row in rows[1:]:
+        cols = row.find_all("td")
+        if len(cols) < 3:
+            continue
+        name_td = cols[1]
+        link_td = cols[2]
+        book_name = name_td.get_text(strip=True)
+        a_tag = link_td.find("a")
+        if a_tag and a_tag.get("href"):
+            books.append([book_name, a_tag["href"]])
+    return books
+
+def scrape_download_links(class_url, force_refresh=False):
+    """
+    Returns a dict with:
+      'english_names' : list of English book names (for display & directories)
+      'bangla_links'  : list of [bangla_book_name, url]
+      'english_links' : list of [english_book_name, url]
+    All lists are aligned by index (same order as the tables).
+    """
+    cache = _load_cache()
+    key = f"books:{class_url}"
+    entry = cache.get(key, {})
+
+    if not force_refresh and _is_fresh(entry):
+        print(f"Using cached book data for {class_url}")
+        return entry.get('data', {'english_names': [], 'bangla_links': [], 'english_links': []})
+
+    print(f"Fetching fresh book data from {class_url}...")
     resp = requests.get(class_url, headers=HEADERS)
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    table = _find_table(soup, language)
-    if not table:
-        print(f"No {language} table found on {class_url}")
-        return []
+    bangla_links = []
+    english_links = []
+    english_names = []
 
-    rows = table.find_all("tr")
-    if len(rows) < 2:
-        return []
+    # Bangla table
+    bangla_header = soup.find('h2', string=re.compile(r'Bangla version', re.IGNORECASE))
+    if bangla_header:
+        table = bangla_header.find_next('table')
+        if table:
+            bangla_links = _extract_books_from_table(table)
 
-    # Determine column indices
-    header_cells = rows[0].find_all(["th", "td"])
-    headers = [cell.get_text(strip=True).lower() for cell in header_cells]
-    num_cols = len(headers)
+    # English table
+    english_header = soup.find('h2', string=re.compile(r'English version', re.IGNORECASE))
+    if english_header:
+        table = english_header.find_next('table')
+        if table:
+            english_links = _extract_books_from_table(table)
 
-    # Name column is usually the second (index 1)
-    name_col = 1 if num_cols > 1 else 0
+    # Build English names list: use English table names if available, otherwise fallback
+    num_books = max(len(bangla_links), len(english_links))
+    for i in range(num_books):
+        if i < len(english_links):
+            english_names.append(english_links[i][0])
+        elif i < len(bangla_links):
+            # Fallback: use Bangla name, but remove Bangla characters to keep it ASCII
+            fallback = re.sub(r'[^\x00-\x7F]+', '', bangla_links[i][0]).strip()
+            if not fallback:
+                fallback = f"Book_{i+1}"
+            english_names.append(fallback)
+        else:
+            english_names.append(f"Book_{i+1}")
 
-    # Find download column based on language
-    if language == 'bangla':
-        download_col = 2 if num_cols > 2 else name_col + 1
-        for i, h in enumerate(headers):
-            if 'বাংলা' in h:
-                download_col = i
-                break
-    else:  # english
-        download_col = 2 if num_cols > 2 else name_col + 1
-        for i, h in enumerate(headers):
-            if 'english' in h or 'ইংরেজি' in h:
-                download_col = i
-                break
-        # For combined 4‑col tables, English download is often column 3
-        if num_cols == 4 and download_col == 2:
-            if len(headers) > 3 and ('english' in headers[3] or 'ইংরেজি' in headers[3]):
-                download_col = 3
-
-    books = []
-    for row in rows[1:]:
-        cols = row.find_all("td")
-        if len(cols) > max(name_col, download_col):
-            textbook_name = cols[name_col].get_text(strip=True)
-            link_tag = cols[download_col].find("a")
-            if link_tag and link_tag.get("href"):
-                books.append([textbook_name, link_tag["href"]])
-
-    # Cache and return
-    cache[cache_key] = {'timestamp': time.time(), 'data': books}
+    data = {
+        'english_names': english_names,
+        'bangla_links': bangla_links,
+        'english_links': english_links
+    }
+    cache[key] = {'timestamp': time.time(), 'data': data}
     _save_cache(cache)
-    print(f"Cached {len(books)} books for {class_url} ({language})")
-    return books
+    print(f"Cached books: {len(bangla_links)} Bangla, {len(english_links)} English")
+    return data
 
-# ---------- Interactive CLI ----------
+# ---------- Standalone CLI (kept for testing, uses English output) ----------
 def main():
-    classes = get_class_links()
-    if not classes:
-        print("No class pages found.")
+    categories = get_categories()
+    if not categories:
+        print("No categories found.")
         return
 
-    print(f"\nFound {len(classes)} class pages:")
+    print("\nAvailable categories:")
+    for i, (name, _) in enumerate(categories, 1):
+        print(f"{i}. {name}")
+
+    choice = int(input("\nSelect category: "))
+    if not (1 <= choice <= len(categories)):
+        print("Invalid choice.")
+        return
+    cat_name, cat_url = categories[choice - 1]
+    print(f"\nCategory: {cat_name}")
+
+    classes = get_class_links(cat_url)
+    if not classes:
+        print("No classes found.")
+        return
+
+    print(f"\nFound {len(classes)} classes:")
     for i, (title, _) in enumerate(classes, 1):
         print(f"{i}. {title}")
 
-    while True:
-        try:
-            choice = int(input("\nEnter the number of the class page to scrape: "))
-            if 1 <= choice <= len(classes):
-                break
-            print(f"Please enter a number between 1 and {len(classes)}")
-        except ValueError:
-            print("Invalid input. Enter a number.")
-
-    selected_title, selected_url = classes[choice - 1]
-    print(f"\nSelected: {selected_title}\nURL: {selected_url}")
-
-    # Detect languages (using cache)
-    lang_info = get_language_availability(selected_url)
-    has_bangla = lang_info.get('bangla', False)
-    has_english = lang_info.get('english', False)
-
-    if has_bangla and has_english:
-        lang_choice = input("\nBoth Bangla and English available. Which version? (b/e): ").strip().lower()
-        language = 'english' if lang_choice.startswith('e') else 'bangla'
-    elif has_bangla:
-        language = 'bangla'
-        print("\nOnly Bangla version available.")
-    elif has_english:
-        language = 'english'
-        print("\nOnly English version available.")
-    else:
-        print("No book tables found.")
+    choice = int(input("\nSelect class: "))
+    if not (1 <= choice <= len(classes)):
+        print("Invalid.")
         return
+    class_title, class_url = classes[choice - 1]
 
-    books = scrape_download_links(selected_url, language)
-    if not books:
+    data = scrape_download_links(class_url)
+    english_names = data['english_names']
+    bangla_links = data['bangla_links']
+    english_links = data['english_links']
+
+    if bangla_links and english_links:
+        lang = input("Both Bangla and English available. Which? (b/e): ").strip().lower()
+        if lang.startswith('e'):
+            links = english_links
+            lang_name = 'English'
+        else:
+            links = bangla_links
+            lang_name = 'Bangla'
+    elif bangla_links:
+        links = bangla_links
+        lang_name = 'Bangla'
+    elif english_links:
+        links = english_links
+        lang_name = 'English'
+    else:
         print("No books found.")
         return
 
-    print(f"\n--- {language.capitalize()} version textbooks ---")
-    for name, url in books:
-        print(f"{name} -> {url}")
+    print(f"\n{len(links)} {lang_name} books (English names displayed):")
+    for i in range(len(links)):
+        print(f"{i+1}. {english_names[i]}")
 
 if __name__ == "__main__":
     main()

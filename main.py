@@ -7,13 +7,11 @@ import scraper
 from ocr import ocr_pdf, check_dependencies, get_tesseract_langs, pdf_has_text
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
 load_dotenv()
 
 BOOKS_DIR = "books"
 HEADERS = scraper.HEADERS
 
-# Optional: warn if Groq key not set when summarisation is requested
 def check_groq_key():
     if not os.environ.get("GROQ_API_KEY"):
         print("⚠ GROQ_API_KEY not set. Summarisation will fail.")
@@ -92,113 +90,141 @@ def download_pdf(url, save_path):
         return False
 
 def sanitize_filename(name):
+    # Allow only ASCII letters, digits, spaces, hyphens, underscores, dots
+    name = re.sub(r'[^\w\s\-.]', '', name, flags=re.ASCII)
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()
 
 def get_book_type(book_name, language):
     """Determine special book type for splitting/OCR."""
     name_lower = book_name.lower()
-    # Check grammar first (before literature)
-    if 'grammar' in name_lower or 'ব্যাকরণ' in book_name:
+    if 'grammar' in name_lower:
         return 'bangla_grammar'
-    # Check literature
     if language == 'english' and 'bangla' in name_lower and 'bangladesh' not in name_lower:
         return 'bangla_lit'
     return 'default'
 
 def main():
-    classes = scraper.get_class_links()
-    if not classes:
-        print("No class pages found.")
+    # 1. Select category
+    categories = scraper.get_categories()
+    if not categories:
+        print("No categories found on homepage.")
         return
+    print("\nSelect a category:")
+    for i, (name, _) in enumerate(categories, 1):
+        print(f"{i}. {name}")
 
-    print(f"\nFound {len(classes)} class pages:")
+    while True:
+        try:
+            choice = int(input("\nEnter number: "))
+            if 1 <= choice <= len(categories):
+                break
+            print(f"Choose between 1 and {len(categories)}")
+        except ValueError:
+            print("Invalid input.")
+    cat_name, cat_url = categories[choice - 1]
+    print(f"\nCategory: {cat_name}")
+
+    # 2. Select class
+    classes = scraper.get_class_links(cat_url)
+    if not classes:
+        print("No classes found in this category.")
+        return
+    print(f"\nFound {len(classes)} classes:")
     for i, (title, _) in enumerate(classes, 1):
         print(f"{i}. {title}")
 
     while True:
         try:
-            choice = int(input("\nEnter the number of the class page: "))
+            choice = int(input("\nEnter class number: "))
             if 1 <= choice <= len(classes):
                 break
-            print(f"Enter a number between 1 and {len(classes)}")
+            print(f"Choose between 1 and {len(classes)}")
         except ValueError:
             print("Invalid input.")
-
     class_title, class_url = classes[choice - 1]
-    class_folder = sanitize_filename(class_title)
-    print(f"\nSelected: {class_title}\nURL: {class_url}")
+    print(f"\nSelected: {class_title}")
 
-    lang_info = scraper.get_language_availability(class_url)
-    has_bangla = lang_info.get('bangla', False)
-    has_english = lang_info.get('english', False)
+    # 3. Get book data (both tables)
+    book_data = scraper.scrape_download_links(class_url)
+    english_names = book_data['english_names']
+    bangla_links = book_data['bangla_links']
+    english_links = book_data['english_links']
 
-    if has_bangla and has_english:
+    # 4. Language selection
+    if bangla_links and english_links:
         lang_choice = input("\nBoth Bangla and English available. Which version? (b/e): ").strip().lower()
-        language = 'english' if lang_choice.startswith('e') else 'bangla'
-    elif has_bangla:
+        if lang_choice.startswith('e'):
+            chosen_links = english_links
+            language = 'english'
+        else:
+            chosen_links = bangla_links
+            language = 'bangla'
+    elif bangla_links:
+        chosen_links = bangla_links
         language = 'bangla'
         print("\nOnly Bangla version available.")
-    elif has_english:
+    elif english_links:
+        chosen_links = english_links
         language = 'english'
         print("\nOnly English version available.")
     else:
-        print("No book tables found.")
+        print("No books found for this class.")
         return
 
-    books = scraper.scrape_download_links(class_url, language)
-    if not books:
-        print("No books found.")
-        return
+    # 5. Show books using English names
+    num_books = len(english_names)
+    print(f"\n{num_books} textbooks (English names):")
+    for i in range(num_books):
+        # Show both English name and source language availability
+        avail = ""
+        if i < len(bangla_links):
+            avail += " [Bangla]"
+        if i < len(english_links):
+            avail += " [English]"
+        print(f"{i+1}. {english_names[i]}")
 
-    valid_books = []
-    for b in books:
-        if isinstance(b, (list, tuple)) and len(b) >= 2:
-            valid_books.append((b[0], b[1]))
-        else:
-            print(f"Skipping invalid book entry: {b}")
-    books = valid_books
-    if not books:
-        print("No valid books after filtering.")
-        return
-
-    print(f"\nFound {len(books)} textbooks in {language.capitalize()} version:")
-    for i, (name, _) in enumerate(books, 1):
-        print(f"{i}. {name}")
-
-    if len(books) == 1:
+    # Choose book
+    if num_books == 1:
         idx = 0
     else:
         while True:
             try:
-                choice = int(input(f"\nEnter the number of the book to download/OCR (1-{len(books)}): "))
-                if 1 <= choice <= len(books):
+                choice = int(input(f"\nEnter book number (1-{num_books}): "))
+                if 1 <= choice <= num_books:
                     idx = choice - 1
                     break
-                print(f"Please enter a number between 1 and {len(books)}")
+                print(f"Pick 1 to {num_books}")
             except ValueError:
-                print("Invalid input. Enter a number.")
+                print("Invalid input.")
+    english_book_name = english_names[idx]
+    download_url = chosen_links[idx][1] if idx < len(chosen_links) else None
+    if not download_url:
+        print("Download link missing for this book in the chosen language.")
+        return
+    print(f"\nDownloading: {english_book_name} ({language} version)")
 
-    book_name, pdf_url = books[idx]
-    print(f"\nProcessing: {book_name}")
-
+    # 6. Setup directories using English names only
+    safe_cat = sanitize_filename(cat_name)
+    safe_class = sanitize_filename(class_title)
+    safe_book = sanitize_filename(english_book_name)
     lang_dir = "bangla" if language == 'bangla' else "english"
-    safe_book_name = sanitize_filename(book_name)
-    book_base_dir = os.path.join(BOOKS_DIR, class_folder, lang_dir, safe_book_name)
+    book_base_dir = os.path.join(BOOKS_DIR, safe_cat, safe_class, lang_dir, safe_book)
 
     original_dir = os.path.join(book_base_dir, "original")
     ocr_dir = os.path.join(book_base_dir, "ocr")
     chapters_dir = os.path.join(book_base_dir, "chapters")
 
-    pdf_filename = safe_book_name + ".pdf"
+    pdf_filename = safe_book + ".pdf"
     pdf_path = os.path.join(original_dir, pdf_filename)
     ocr_path = os.path.join(ocr_dir, pdf_filename)
 
-    if not download_pdf(pdf_url, pdf_path):
+    # 7. Download PDF
+    if not download_pdf(download_url, pdf_path):
         print("Download failed, exiting.")
         return
 
-    book_type = get_book_type(book_name, language)
-
+    # 8. OCR (optional)
+    book_type = get_book_type(english_book_name, language)
     ocr_enabled = input("\nGenerate searchable (OCR) PDF? (y/n): ").strip().lower().startswith('y')
     if ocr_enabled:
         tess_ok, gs_ok = check_dependencies()
@@ -239,6 +265,7 @@ def main():
                     else:
                         print(f"OCR failed: {e}")
 
+    # 9. Split into chapters/units (optional)
     split_choice = input("\nSplit into chapters/units? (y/n): ").strip().lower()
     if split_choice.startswith('y'):
         try:
@@ -277,7 +304,7 @@ def main():
         else:
             print("No sections to split.")
 
-    # Summarization (optional)
+    # 10. Summarise (optional)
     summarise_choice = input("\nSummarise a chapter using Groq AI? (y/n): ").strip().lower()
     if summarise_choice.startswith('y'):
         if not os.environ.get("GROQ_API_KEY"):
