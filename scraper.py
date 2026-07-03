@@ -33,6 +33,30 @@ def _is_fresh(entry):
         return False
     return (time.time() - entry['timestamp']) < CACHE_TTL
 
+# ---------- Safe request + cache fallback ----------
+def _fetch_with_fallback(url, cache_key, force_refresh=False):
+    """
+    Try a live GET. On failure, return cached data (even expired).
+    Returns (data, source) where source is 'live', 'fresh_cache', 'stale_cache', or 'none'.
+    """
+    cache = _load_cache()
+    entry = cache.get(cache_key, {})
+    cached_data = entry.get('data') if isinstance(entry, dict) else None
+
+    if not force_refresh and _is_fresh(entry) and cached_data is not None:
+        return cached_data, 'fresh_cache'
+
+    # Try live request
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        return resp.text, 'live'
+    except Exception as e:
+        print(f"⚠ Live request failed ({e}). Trying cached data...")
+        if cached_data is not None:
+            return cached_data, 'stale_cache'
+        return None, 'none'
+
 # ---------- Category mapping ----------
 CATEGORY_MAP = {
     "প্রাথমিক": "Primary",
@@ -42,96 +66,87 @@ CATEGORY_MAP = {
 }
 
 def _to_english_category(bangla_name):
-    return CATEGORY_MAP.get(bangla_name, bangla_name)  # fallback just in case
+    return CATEGORY_MAP.get(bangla_name, bangla_name)
 
 def get_categories(force_refresh=False):
-    """
-    Returns list of [english_name, url] from the homepage category grid.
-    """
+    """Returns list of [english_name, url] – live or from cache."""
     cache = _load_cache()
     key = 'categories'
+
+    # Try live first (or fresh cache)
+    html, source = _fetch_with_fallback(BASE_URL, key, force_refresh)
+
+    if html is None:
+        return []
+
+    # If we got live HTML, parse it
+    if source == 'live':
+        soup = BeautifulSoup(html, "html.parser")
+        categories = []
+        grid = soup.select_one('.nctb-levels')
+        if grid:
+            for a in grid.find_all('a', class_='nctb-level'):
+                name_span = a.find('span', class_='nctb-level__name')
+                if name_span:
+                    raw_name = name_span.get_text(strip=True)
+                    eng_name = _to_english_category(raw_name)
+                    url = a.get('href')
+                    if url and not url.startswith('http'):
+                        url = BASE_URL + url
+                    categories.append([eng_name, url])
+        cache[key] = {'timestamp': time.time(), 'data': categories}
+        _save_cache(cache)
+        print(f"✅ Cached {len(categories)} categories (live).")
+        return categories
+
+    # Fallback to cached data (source is 'fresh_cache' or 'stale_cache')
     entry = cache.get(key, {})
+    data = entry.get('data', [])
+    print(f"📦 Using cached categories ({len(data)} items).")
+    return data
 
-    if not force_refresh and _is_fresh(entry):
-        print("Using cached categories (24h valid).")
-        return entry.get('data', [])
-
-    print("Fetching fresh category links from homepage...")
-    categories = []
-    resp = requests.get(BASE_URL, headers=HEADERS)
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    grid = soup.select_one('.nctb-level-grid')
-    if grid:
-        for a in grid.find_all('a', class_='nctb-level-card'):
-            name_div = a.find('div', class_='nctb-level-name')
-            if name_div:
-                raw_name = name_div.get_text(strip=True)
-                eng_name = _to_english_category(raw_name)
-                url = a.get('href')
-                if url and not url.startswith('http'):
-                    url = BASE_URL + url
-                categories.append([eng_name, url])
-
-    cache[key] = {'timestamp': time.time(), 'data': categories}
-    _save_cache(cache)
-    print(f"Cached {len(categories)} categories.")
-    return categories
-
-# ---------- Class list inside a category ----------
+# ---------- Class list ----------
 def _clean_class_title(raw_title):
-    """
-    Extract the English portion from e.g.
-    "Class 9 Book 2026 PDF | ৯ম শ্রেণির বই ২০২৬"
-    """
-    # Split on '|' and keep the first part
     parts = raw_title.split('|')
     english_part = parts[0].strip()
-    # Remove extra "PDF" duplicates, etc.
-    english_part = re.sub(r'\s+', ' ', english_part)
-    return english_part
+    return re.sub(r'\s+', ' ', english_part)
 
 def get_class_links(category_url, force_refresh=False):
-    """
-    Returns list of [english_title, url] from a category page (cat-grid).
-    """
-    cache = _load_cache()
     key = f"classes:{category_url}"
+    html, source = _fetch_with_fallback(category_url, key, force_refresh)
+
+    if html is None:
+        return []
+
+    if source == 'live':
+        soup = BeautifulSoup(html, "html.parser")
+        classes = []
+        grid = soup.select_one('.nctb-grid')
+        if grid:
+            for card in grid.find_all('a', class_='nctb-card'):
+                title_h3 = card.find('h3', class_='nctb-card__title')
+                if title_h3:
+                    raw_title = title_h3.get_text(strip=True)
+                    eng_title = _clean_class_title(raw_title)
+                    url = card.get('href')
+                    if url and not url.startswith('http'):
+                        url = BASE_URL + url
+                    classes.append([eng_title, url])
+        cache = _load_cache()
+        cache[key] = {'timestamp': time.time(), 'data': classes}
+        _save_cache(cache)
+        print(f"✅ Cached {len(classes)} classes (live).")
+        return classes
+
+    # Fallback
+    cache = _load_cache()
     entry = cache.get(key, {})
+    data = entry.get('data', [])
+    print(f"📦 Using cached classes ({len(data)} items).")
+    return data
 
-    if not force_refresh and _is_fresh(entry):
-        print(f"Using cached class links for {category_url}")
-        return entry.get('data', [])
-
-    print(f"Fetching fresh class links from {category_url}...")
-    classes = []
-    resp = requests.get(category_url, headers=HEADERS)
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    grid = soup.select_one('.cat-grid')
-    if grid:
-        for card in grid.find_all('a', class_='cat-card'):
-            title_div = card.find('div', class_='cat-title')
-            if title_div:
-                raw_title = title_div.get_text(strip=True)
-                eng_title = _clean_class_title(raw_title)
-                url = card.get('href')
-                if url and not url.startswith('http'):
-                    url = BASE_URL + url
-                classes.append([eng_title, url])
-
-    # Note: pagination can be added if needed.
-
-    cache[key] = {'timestamp': time.time(), 'data': classes}
-    _save_cache(cache)
-    print(f"Cached {len(classes)} classes for {category_url}")
-    return classes
-
-# ---------- Book extraction from a class page ----------
+# ---------- Book extraction ----------
 def _extract_books_from_table(table):
-    """
-    From a <table> element, return list of [book_name, download_url].
-    """
     books = []
     rows = table.find_all("tr")
     if len(rows) < 2:
@@ -149,72 +164,80 @@ def _extract_books_from_table(table):
     return books
 
 def scrape_download_links(class_url, force_refresh=False):
-    """
-    Returns a dict with:
-      'english_names' : list of English book names (for display & directories)
-      'bangla_links'  : list of [bangla_book_name, url]
-      'english_links' : list of [english_book_name, url]
-    All lists are aligned by index (same order as the tables).
-    """
-    cache = _load_cache()
     key = f"books:{class_url}"
-    entry = cache.get(key, {})
+    html, source = _fetch_with_fallback(class_url, key, force_refresh)
 
-    if not force_refresh and _is_fresh(entry):
-        print(f"Using cached book data for {class_url}")
-        return entry.get('data', {'english_names': [], 'bangla_links': [], 'english_links': []})
+    if html is None:
+        return {'english_names': [], 'bangla_links': [], 'english_links': []}
 
-    print(f"Fetching fresh book data from {class_url}...")
-    resp = requests.get(class_url, headers=HEADERS)
-    soup = BeautifulSoup(resp.text, "html.parser")
+    if source == 'live':
+        soup = BeautifulSoup(html, "html.parser")
+        bangla_links = []
+        english_links = []
 
-    bangla_links = []
-    english_links = []
-    english_names = []
+        post_content = soup.select_one('.post-content')
+        if post_content:
+            bangla_header = post_content.find('h2', string=re.compile(r'Bangla version', re.IGNORECASE))
+            if bangla_header:
+                table = bangla_header.find_next('table')
+                if table:
+                    bangla_links = _extract_books_from_table(table)
 
-    # Bangla table
-    bangla_header = soup.find('h2', string=re.compile(r'Bangla version', re.IGNORECASE))
-    if bangla_header:
-        table = bangla_header.find_next('table')
-        if table:
-            bangla_links = _extract_books_from_table(table)
-
-    # English table
-    english_header = soup.find('h2', string=re.compile(r'English version', re.IGNORECASE))
-    if english_header:
-        table = english_header.find_next('table')
-        if table:
-            english_links = _extract_books_from_table(table)
-
-    # Build English names list: use English table names if available, otherwise fallback
-    num_books = max(len(bangla_links), len(english_links))
-    for i in range(num_books):
-        if i < len(english_links):
-            english_names.append(english_links[i][0])
-        elif i < len(bangla_links):
-            # Fallback: use Bangla name, but remove Bangla characters to keep it ASCII
-            fallback = re.sub(r'[^\x00-\x7F]+', '', bangla_links[i][0]).strip()
-            if not fallback:
-                fallback = f"Book_{i+1}"
-            english_names.append(fallback)
+            english_header = post_content.find('h2', string=re.compile(r'English version', re.IGNORECASE))
+            if english_header:
+                table = english_header.find_next('table')
+                if table:
+                    english_links = _extract_books_from_table(table)
         else:
-            english_names.append(f"Book_{i+1}")
+            # fallback search whole page
+            bangla_header = soup.find('h2', string=re.compile(r'Bangla version', re.IGNORECASE))
+            if bangla_header:
+                table = bangla_header.find_next('table')
+                if table:
+                    bangla_links = _extract_books_from_table(table)
+            english_header = soup.find('h2', string=re.compile(r'English version', re.IGNORECASE))
+            if english_header:
+                table = english_header.find_next('table')
+                if table:
+                    english_links = _extract_books_from_table(table)
 
-    data = {
-        'english_names': english_names,
-        'bangla_links': bangla_links,
-        'english_links': english_links
-    }
-    cache[key] = {'timestamp': time.time(), 'data': data}
-    _save_cache(cache)
-    print(f"Cached books: {len(bangla_links)} Bangla, {len(english_links)} English")
+        # Build English names list
+        english_names = []
+        num_books = max(len(bangla_links), len(english_links))
+        for i in range(num_books):
+            if i < len(english_links):
+                english_names.append(english_links[i][0])
+            elif i < len(bangla_links):
+                fallback = re.sub(r'[^\x00-\x7F]+', '', bangla_links[i][0]).strip()
+                if not fallback:
+                    fallback = f"Book_{i+1}"
+                english_names.append(fallback)
+            else:
+                english_names.append(f"Book_{i+1}")
+
+        data = {
+            'english_names': english_names,
+            'bangla_links': bangla_links,
+            'english_links': english_links
+        }
+        cache = _load_cache()
+        cache[key] = {'timestamp': time.time(), 'data': data}
+        _save_cache(cache)
+        print(f"✅ Cached books: {len(bangla_links)} Bangla, {len(english_links)} English (live).")
+        return data
+
+    # Fallback
+    cache = _load_cache()
+    entry = cache.get(key, {})
+    data = entry.get('data', {'english_names': [], 'bangla_links': [], 'english_links': []})
+    print(f"📦 Using cached books ({len(data.get('english_names', []))} items).")
     return data
 
-# ---------- Standalone CLI (kept for testing, uses English output) ----------
+# ---------- Standalone CLI ----------
 def main():
     categories = get_categories()
     if not categories:
-        print("No categories found.")
+        print("No categories found (offline with empty cache).")
         return
 
     print("\nAvailable categories:")
